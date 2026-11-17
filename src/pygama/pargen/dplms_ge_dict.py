@@ -7,16 +7,19 @@ from __future__ import annotations
 import itertools
 import logging
 import time
+from typing import TYPE_CHECKING
 
 import matplotlib.pyplot as plt
 import numpy as np
-from lgdo import Table
 from scipy.signal import convolve, convolve2d
 from scipy.stats import chi2
 
 from pygama.pargen.dsp_optimize import run_one_dsp
 from pygama.pargen.energy_optimisation import fom_fwhm_with_alpha_fit
 from pygama.pargen.utils import require_config_keys
+
+if TYPE_CHECKING:
+    from lgdo import Table
 
 log = logging.getLogger(__name__)
 
@@ -31,6 +34,7 @@ def dplms_ge_dict(
     decay_const: float = 0,
     ene_par: str = "dplmsEmax",
     ctc_par: str = "dt_eff",
+    db_key: str = "dplms",
     display: int = 0,
 ) -> dict:
     """
@@ -145,6 +149,14 @@ def dplms_ge_dict(
 
     use_log_pdf = dplms_dict.get("use_log_pdf", False)
 
+    # optional fixed-time pickoff axis (used e.g. for a dplmsEftp optimisation
+    # run); when absent, behaviour is unchanged and the DSP chain falls back
+    # to the midpoint default
+    pickoffs = dplms_dict.get("pickoffs")
+    if pickoffs is not None:
+        coeff_keys = [*coeff_keys, "pickoff"]
+        lists = [*lists, list(pickoffs)]
+
     prod = list(itertools.product(*lists))
     grid_dict = {}
     min_fom = float("inf")
@@ -196,7 +208,10 @@ def dplms_ge_dict(
             dplms_dict["length"],
             wsize,
         )
-        par_dsp["dplms"] = {"length": dplms_dict["length"], "coefficients": x}
+        dplms_pars = {"length": dplms_dict["length"], "coefficients": x}
+        if "pickoff" in coeff_values:
+            dplms_pars["pickoff"] = int(coeff_values["pickoff"])
+        par_dsp[db_key] = dplms_pars
         log.info(
             "Filter synthesis in %.1f s, filter area %s",
             time.time() - t_tmp,
@@ -285,7 +300,17 @@ def dplms_ge_dict(
             missing = [
                 k
                 for k, v in zip(
-                    ["fwhm", "fwhm_err", "alpha", "nm", "za", "pl", "ft", "rt", "pt"],
+                    [
+                        "fwhm",
+                        "fwhm_err",
+                        "alpha",
+                        "nm",
+                        "za",
+                        "pl",
+                        "ft",
+                        "rt",
+                        "pt",
+                    ],
                     [
                         fwhm,
                         fwhm_err,
@@ -333,20 +358,22 @@ def dplms_ge_dict(
         wsize,
     )
 
-    out_dict = {
-        "dplms": {
-            "length": dplms_dict["length"],
-            "coefficients": x,
-            "dp_coeffs": {
-                "nm": nm_coeff,
-                "za": za_coeff,
-                "pl": pl_coeff,
-                "ft": ft_coeff,
-                "rt": rt_coeff,
-                "pt": pt_coeff,
-            },
-        }
+    out_block = {
+        "length": dplms_dict["length"],
+        "coefficients": x,
+        "dp_coeffs": {
+            "nm": nm_coeff,
+            "za": za_coeff,
+            "pl": pl_coeff,
+            "ft": ft_coeff,
+            "rt": rt_coeff,
+            "pt": pt_coeff,
+        },
     }
+    best_pickoff = best_case_values.get("pickoff")
+    if best_pickoff is not None:
+        out_block["pickoff"] = int(best_pickoff)
+    out_dict = {db_key: out_block}
     out_alpha_dict = {
         f"{ene_par}_ctc": {
             "expression": f"{ene_par}*(1+{ctc_par}*a)",
@@ -386,7 +413,9 @@ def dplms_ge_dict(
         axin = ax.inset_axes([0.1, 0.15, 0.35, 0.5])
         for wf in wfs:
             axin.plot(wf)
-        axin.set_xlim(wsize / 2 - dplms_dict["zoom"], wsize / 2 + dplms_dict["zoom"])
+        axin.set_xlim(
+            wsize / 2 - dplms_dict["zoom"], wsize / 2 + dplms_dict["zoom"]
+        )
         axin.set_yticklabels("")
         plot_dict["wfs"] = fig
         plt.close()
@@ -399,7 +428,9 @@ def dplms_ge_dict(
         cal_par = {}
         wfs_cut_pars = ["centroid", "peak_pos", "risetime"]
 
-        fig, ax = plt.subplots(nrows=2, ncols=3, figsize=(16, 9), facecolor="white")
+        fig, ax = plt.subplots(
+            nrows=2, ncols=3, figsize=(16, 9), facecolor="white"
+        )
 
         for ii, par in enumerate(wfs_cut_pars):
             pspace = np.linspace(
@@ -418,7 +449,9 @@ def dplms_ge_dict(
                 hh, bb = np.histogram(risetime, bins=rt_space)
             else:
                 llo, lup = np.min(cal_par[par]), np.max(cal_par[par])
-                hh, bb = np.histogram(cal_par[par], bins=np.linspace(llo, lup, 200))
+                hh, bb = np.histogram(
+                    cal_par[par], bins=np.linspace(llo, lup, 200)
+                )
             ax.flat[ii + 1].plot(bb[1:], hh, ds="steps", label=f"cut on {par}")
             ax.flat[ii + 1].axvline(
                 llo, color="k", linestyle=":", label=f"sel. {llo:.1f} {lup:.1f}"
@@ -460,7 +493,9 @@ def dplms_ge_dict(
     return out_dict
 
 
-def is_valid_centroid(centroid: np.array, lim: int, size: int, full_size: int) -> tuple:
+def is_valid_centroid(
+    centroid: np.array, lim: int, size: int, full_size: int
+) -> tuple:
     """
     Select waveforms whose centroid lies within a valid alignment window.
 
@@ -534,7 +569,9 @@ def is_not_pile_up(
 
     idx_low = low_thr_idxs[-1] if low_thr_idxs.size > 0 else 0
     idx_upp = (
-        upp_thr_idxs[0] + hist.argmax() if upp_thr_idxs.size > 0 else len(hist) - 1
+        upp_thr_idxs[0] + hist.argmax()
+        if upp_thr_idxs.size > 0
+        else len(hist) - 1
     )
 
     llow, lupp = bin_edges[idx_low], bin_edges[idx_upp]
@@ -543,7 +580,8 @@ def is_not_pile_up(
     condition1 = np.count_nonzero(pos, axis=1) == 1
     condition2 = (
         np.count_nonzero(
-            pos & ((peak_pos < llow) | (peak_pos > lupp) & (peak_pos < size)), axis=1
+            pos & ((peak_pos < llow) | (peak_pos > lupp) & (peak_pos < size)),
+            axis=1,
         )
         == 0
     )
@@ -617,13 +655,25 @@ def signal_selection(dsp_cal, dplms_dict, coeff_values) -> dict:
     bsize = dplms_dict["bsize"]
 
     centroid_lim = dplms_dict["centroid_lim"]
-    perc = coeff_values["rt"] if "rt" in coeff_values else dplms_dict["dp_def"]["rt"]
-    thr = coeff_values["pt"] if "pt" in coeff_values else dplms_dict["dp_def"]["pt"]
+    perc = (
+        coeff_values["rt"]
+        if "rt" in coeff_values
+        else dplms_dict["dp_def"]["rt"]
+    )
+    thr = (
+        coeff_values["pt"]
+        if "pt" in coeff_values
+        else dplms_dict["dp_def"]["pt"]
+    )
 
-    idxs_ct, ct_ll, ct_hh = is_valid_centroid(centroid, centroid_lim, wsize, bsize)
+    idxs_ct, ct_ll, ct_hh = is_valid_centroid(
+        centroid, centroid_lim, wsize, bsize
+    )
     log.info("... %s signals after alignment", len(peak_pos[idxs_ct, :]))
 
-    idxs_pp, pp_ll, pp_hh = is_not_pile_up(peak_pos, peak_pos_neg, thr, peak_lim, wsize)
+    idxs_pp, pp_ll, pp_hh = is_not_pile_up(
+        peak_pos, peak_pos_neg, thr, peak_lim, wsize
+    )
     log.info("... %s signals after pile-up cut", len(peak_pos[idxs_pp, :]))
 
     idxs_rt, rt_ll, rt_hh = is_valid_risetime(risetime, rt_low, perc)
@@ -668,7 +718,9 @@ def noise_matrix(bls: np.array, length: int) -> np.ndarray:
     bls = bls - offset
     nmat = np.matmul(bls.T, bls, dtype=float) / nev
     kernel = np.identity(size - length + 1)
-    return convolve2d(nmat, kernel, boundary="symm", mode="valid") / (size - length + 1)
+    return convolve2d(nmat, kernel, boundary="symm", mode="valid") / (
+        size - length + 1
+    )
 
 
 def noise_matrix_corr(
@@ -730,9 +782,9 @@ def noise_matrix_corr(
     for i in range(n):
         for j in range(n):
             if block_mat[i][j] is not None:
-                nmat[i * length : (i + 1) * length, j * length : (j + 1) * length] = (
-                    block_mat[i][j]
-                )
+                nmat[
+                    i * length : (i + 1) * length, j * length : (j + 1) * length
+                ] = block_mat[i][j]
 
     return 0.5 * (nmat + nmat.T)
 
@@ -786,7 +838,11 @@ def signal_matrices(
     rmat = np.outer(ref[flo:fhi], ref[flo:fhi])
 
     # Pile-up matrix
-    decay = -np.arange(length) * decay_const if decay_const > 0 else np.zeros(length)
+    decay = (
+        -np.arange(length) * decay_const
+        if decay_const > 0
+        else np.zeros(length)
+    )
     pmat = np.outer(decay, decay)
 
     # Flat top matrix
@@ -797,7 +853,10 @@ def signal_matrices(
     m1 = ((1, -1), (-1, 1))
     fmat = convolve2d(fmat, m1, boundary="symm", mode="valid")
     if ff > 0:
-        fmat = convolve2d(fmat, np.identity(ff), boundary="symm", mode="valid") / ff
+        fmat = (
+            convolve2d(fmat, np.identity(ff), boundary="symm", mode="valid")
+            / ff
+        )
     return ref, rmat, pmat, fmat
 
 
@@ -966,5 +1025,7 @@ def filter_synthesis_corr(
     x /= np.max(y)
 
     if flip:
-        return [np.flip(x[n * length : (n + 1) * length]) for n in range(n_geds)]
+        return [
+            np.flip(x[n * length : (n + 1) * length]) for n in range(n_geds)
+        ]
     return [x[n * length : (n + 1) * length] for n in range(n_geds)]
